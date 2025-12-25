@@ -1,0 +1,103 @@
+# week2_day5_multi_format_loader_fixed.py  —— Day5多格式文档加载终极版（2025最新兼容）
+
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.chat_models.tongyi import ChatTongyi
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_classic.chains import RetrievalQA  # 最稳同步链，零卡死
+from langchain_core.documents import Document
+from pathlib import Path
+import pandas as pd
+
+# ========= 配置 =========
+QIANWEN_API_KEY = "sk-你的apikey"
+DOCS_FOLDER = "D:/company_docs"
+PERSIST_DIRECTORY = "D:/chroma_db_multi"
+# ===========================
+
+def load_multi_format_docs(folder_path: str):
+    folder = Path(folder_path)
+    docs = []
+    
+    for file_path in folder.rglob("*"):
+        print(f"正在加载: {file_path}")
+        try:
+            if file_path.suffix.lower() == ".pdf":
+                from langchain_community.document_loaders import PyMuPDFLoader
+                loader = PyMuPDFLoader(str(file_path))
+                loaded = loader.load()
+                for d in loaded:
+                    d.metadata["source"] = str(file_path)
+                docs.extend(loaded)
+                
+            elif file_path.suffix.lower() in [".docx", ".doc"]:
+                from langchain_community.document_loaders import Docx2txtLoader
+                loader = Docx2txtLoader(str(file_path))
+                loaded = loader.load()
+                for d in loaded:
+                    d.metadata["source"] = str(file_path)
+                docs.extend(loaded)
+                
+            elif file_path.suffix.lower() in [".xlsx", ".xls"]:
+                df = pd.read_excel(file_path)
+                text = f"文件名: {file_path.name}\n" + df.to_string()
+                docs.append(Document(page_content=text, metadata={"source": str(file_path)}))
+                
+            elif file_path.suffix.lower() in [".txt", ".log"]:
+                text = file_path.read_text(encoding="utf-8", errors="ignore")
+                docs.append(Document(page_content=text, metadata={"source": str(file_path)}))
+                
+        except Exception as e:
+            print(f"加载失败 {file_path}: {e}")
+    
+    return docs
+
+print("开始加载多格式文档...")
+docs = load_multi_format_docs(DOCS_FOLDER)
+
+if not docs:
+    print("错误：没有加载到任何文档！检查路径和文件格式")
+else:
+    print(f"成功加载 {len(docs)} 个文档对象")
+
+    # 分块
+    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+    chunks = splitter.split_documents(docs)
+    print(f"分块完成，共 {len(chunks)} 块")
+
+    # Embedding + 向量库（新版自动保存）
+    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-large-zh-v1.5")
+
+    # 强制重建库
+    vectorstore = Chroma.from_documents(
+        chunks,
+        embeddings,
+        persist_directory=PERSIST_DIRECTORY
+    )
+    print(f"向量库已自动保存到 {PERSIST_DIRECTORY}")
+
+    # LLM + 最稳RetrievalQA
+    llm = ChatTongyi(model="qwen-turbo", dashscope_api_key=QIANWEN_API_KEY)
+
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=vectorstore.as_retriever(search_kwargs={"k": 6}),
+        return_source_documents=True
+    )
+
+    # 测试循环
+    print("\n多格式RAG已启动！输入exit退出")
+    while True:
+        query = input("\n问文档问题：")
+        if query.lower() == "exit":
+            break
+            
+        result = qa_chain.invoke({"query": query})
+        print(f"\nAI答：{result['result']}")
+        print("\n来源文档：")
+        for doc in result['source_documents']:
+            source = doc.metadata.get('source', '未知')
+            print(f"- {Path(source).name}")
+
+print("结束！")
