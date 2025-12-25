@@ -1,0 +1,87 @@
+# -*- coding: utf-8 -*-
+# ai_ops_nuclear_v1.py  ——  第1周核弹合体版（45岁运维老兵亲测）
+# 功能：CPU高/日志ERROR → 通义千问诊断 → 企业微信@所有人
+
+import psutil
+import time
+import requests
+import json
+from datetime import datetime
+from pathlib import Path
+from dashscope import Generation
+
+# ========= 你只需要改下面这三行 =========
+QIANWEN_API_KEY = "sk-你的阿里千问APIKEY"   # 通义千问API Key（免费领）
+WECHAT_WEBHOOK   = "你的微信webhook"  # 群机器人
+LOG_ROOT = Path("D:/logs")           # 日志根目录
+# ========================================
+import os
+os.environ['DASHSCOPE_API_KEY']=QIANWEN_API_KEY
+Generation.api_key = QIANWEN_API_KEY
+last_alert_time = 0          # 防止1分钟刷屏
+scanned_files = set()        # 记录已扫描过的文件，避免重复告警
+
+def ask_qwen(prompt: str) -> str:
+    try:
+        resp = Generation.call(model='qwen-turbo', prompt=prompt)
+        if resp.status_code == 200:
+            return resp.output['text'].strip()
+        return "大模型调用失败"
+    except Exception as e:
+        return f"大模型异常：{e}"
+
+def push_wechat_md(title: str, content: str = "", mention_all: bool = False):
+    data = {
+        "msgtype": "markdown",
+        "markdown": {
+            "content": f"{title}\n{content}\n> <font color='red'>自动告警</font> {datetime.now():%Y-%m-%d %H:%M:%S}"
+        }
+    }
+    if mention_all:
+        data["markdown"]["content"] = "@所有人\n" + data["markdown"]["content"]
+    
+    try:
+        r = requests.post(WECHAT_WEBHOOK, json=data, timeout=10)
+        if r.json().get("errcode") != 0:
+            print("推送失败：", r.text)
+    except Exception as e:
+        print("网络异常：", e)
+
+def check_cpu():
+    global last_alert_time
+    cpu = psutil.cpu_percent(interval=1)
+    if cpu > 80 and time.time() - last_alert_time > 300:  # 5分钟只发一次
+        prompt = f"服务器CPU突然飙到{cpu}%，作为10年运维老兵，最可能的3个原因和解决方案是什么？每条不超过30字。"
+        answer = ask_qwen(prompt)
+        msg = f"### 🚨 CPU高负载告警\n当前CPU：{cpu}%\n\n**AI诊断：**\n{answer}"
+        push_wechat_md("CPU告警", msg, mention_all=True)
+        last_alert_time = time.time()
+
+def scan_logs():
+    global last_alert_time
+    if not LOG_ROOT.exists():
+        return
+    
+    for log_file in LOG_ROOT.rglob("*.log"):
+        if log_file not in scanned_files and log_file.stat().st_size > 0:
+            try:
+                with log_file.open('r', encoding='utf-8', errors='ignore') as f:
+                    new_lines = [line for line in f if any(kw in line.upper() for kw in ["ERROR","FAIL","EXCEPTION","FATAL"])]
+                if new_lines and time.time() - last_alert_time > 300:
+                    sample = "\n".join(new_lines[-5:])  # 最后5行
+                    prompt = f"日志发现严重错误，请分析可能原因和解决方案（中文，简洁3条）：\n{sample}"
+                    answer = ask_qwen(prompt)
+                    msg = f"### 日志严重异常\n文件：{log_file}\n\n最新错误：\n{sample}\n\n**AI诊断：**\n{answer}"
+                    push_wechat_md("日志告警", msg, mention_all=True)
+                    last_alert_time = time.time()
+            except:
+                continue
+        scanned_files.add(log_file)
+
+print("核弹已启动！AI运维分身正式上线！（Ctrl+C停止）")
+print(f"监控目录：{LOG_ROOT}   |   企业微信群已绑定")
+
+while True:
+    check_cpu()
+    scan_logs()
+    time.sleep(10)   # 主循环10秒一次
