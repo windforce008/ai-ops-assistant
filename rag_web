@@ -1,0 +1,96 @@
+# week2_day6_streamlit_web.py  —— Day6本地Web界面（Streamlit版运维ChatGPT）
+
+import streamlit as st
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.chat_models.tongyi import ChatTongyi
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate
+from pathlib import Path
+
+# ========= 配置 =========
+QIANWEN_API_KEY = "sk-你的apikey"
+CHROMA_DB_PATH = "D:/chroma_db_multi"  # 用Day1或Day5建的库,这里的目录需要你创建
+# ===========================
+
+# 页面配置
+st.set_page_config(page_title="运维AI助手", page_icon="🤖", layout="wide")
+st.title("🤖 运维AI助手 - 公司IT专属知识库")
+st.caption("基于公司文档的RAG问答系统，由李先生打造")
+
+# 侧边栏
+with st.sidebar:
+    st.header("配置")
+    st.write(f"向量库路径: {CHROMA_DB_PATH}")
+    st.write("模型: 通义千问 qwen-turbo")
+    st.divider()
+    st.caption("输入问题后回车发送，支持多轮对话")
+
+# 初始化
+@st.cache_resource
+def load_rag_chain():
+    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-large-zh-v1.5")
+    vectorstore = Chroma(persist_directory=CHROMA_DB_PATH, embedding_function=embeddings)
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+
+    llm = ChatTongyi(model="qwen-turbo", dashscope_api_key=QIANWEN_API_KEY)
+
+    qa_prompt = ChatPromptTemplate.from_template(
+        "你是一个专业的运维助手。根据以下上下文回答问题，用中文，简洁专业：\n\n{context}\n\n问题：{input}"
+    )
+    question_chain = create_stuff_documents_chain(llm, qa_prompt)
+    rag_chain = create_retrieval_chain(retriever, question_chain)
+    return rag_chain
+
+rag_chain = load_rag_chain()
+
+# 聊天历史
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# 显示历史消息
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        if "sources" in message:
+            with st.expander("来源文档"):
+                st.write(message["sources"])
+
+# 用户输入
+if prompt := st.chat_input("问我运维问题..."):
+    # 显示用户消息
+    st.chat_message("user").write(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    # 调用RAG
+    with st.chat_message("assistant"):
+        with st.spinner("思考中..."):
+            result = rag_chain.invoke({"input": prompt})
+            answer = result["answer"]
+
+            # 来源
+            sources = ""
+            seen = set()
+            for doc in result.get("context", [])[:3]:
+                filename = Path(doc.metadata.get('source', '未知文件')).name
+                if filename not in seen:
+                    sources += f"- {filename}\n"
+                    seen.add(filename)
+
+            full_answer = answer
+            if sources:
+                full_answer += f"\n\n**来源文档：**\n{sources}"
+
+            st.markdown(full_answer)
+
+    # 保存AI消息
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": full_answer,
+        "sources": sources
+    })
+
+# 底部
+st.divider()
+st.caption("热烈庆祝公司专属运维ChatGPT已上线")
